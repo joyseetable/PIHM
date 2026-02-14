@@ -1,0 +1,73 @@
+
+defaults:
+  - dataset: mscoco
+  # - dataset: rsicd
+  # - dataset: rsitmd
+  # - dataset: ucm
+  # - dataset: flickr30k
+  - trainer: default
+  - _self_ 
+
+model:
+  name: 'My'
+  original_clip_name: 'ViT-B/32'
+  training_stage: 1
+  embedding_key: 'cls'
+  prompt_init: 'uniform'
+  # prototype_centers_path: "/data/clc/APSE-IPIK/NEW_APSEIPIK/offline/clustering_results/cluster_centers.npy" # 20类
+  # prototype_centers_path: "/data/clc/APSE-IPIK/NEW_APSEIPIK/offline/clustering_results/cluster_centers_160.npy" # 160类
+  prototype_centers_path: ${select_path:${model.original_clip_name}}
+  # type: 'baseline_full_finetune'
+  type: 'ours'
+  margin: 0.1
+  triplet_weight: 0.1
+  enhanced_clip_weight: 0.1
+  enhanced_triplet_weight: 0.001
+  dist_weight: 20
+  adapter_bottleneck_dim: 64
+  aux_loss_weight: 1
+  aux_start_weight: 10
+  dist_start_weight: 0
+
+
+  num_classes: 160
+  # num_classes: 32
+  # num_classes: 20
+  prompt:
+    prompt_len: 10
+    prompt_pool_size: 20
+    top_k: 3
+    prompt_pool: True
+
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1e-5          
+  weight_decay: 0.01
+
+trainer:
+  max_epochs: 20
+  val_check_interval: 1.0
+
+seed: 42
+# project_name: 'prompt_vpt_sharedprompt_vitb32_lr1e-4_160cls_savetop1'
+# project_name: 'prompt_vpt_sharedprompt_vitb16_lr1e-4_160cls_savetop1'
+# project_name: 'prompt_vpt_sharedprompt_vitl14_lr1e-4_160cls_savetop1_new'
+# project_name: 'prompt_vpt_sharedprompt_vitb32_lr1e-4_160cls_savetop1_new'
+# project_name: 'prompt_vpt_sharedprompt_vitb32_lr1e-4cls_savetop1_with0.3'
+project_name: 'baseline_full_finetune_ratio0.3'
+# project_name: 'NEW_clc_prompt_vpt_vitb32_distill2_xiaorong_lr1e-4_160cls_savetop1'
+# project_name: 'NEW_clc_prompt_vpt_vitb32_lr1e-4_160cls_savetop1'
+
+test_only: False
+checkpoint_path: null
+
+caption_generator:
+  model_name: "Salesforce/blip2-flan-t5-xl"
+
+checkpoint_callback:
+  monitor: 'val/RSUM'
+  mode: 'max'
+  save_top_k: 1
+  filename: 'best-epoch={epoch}-rsum={val/RSUM:.2f}'
+  
