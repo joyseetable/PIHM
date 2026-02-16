@@ -4,7 +4,7 @@ import torch.nn as nn
 class InternalLossWeighter(nn.Module):
     def __init__(self, num_losses=3):
         super().__init__()
-        # 初始化为0，即初始权重为 e^0 = 1
+        
         self.log_vars = nn.Parameter(torch.zeros(num_losses))
 
     def forward(self, losses):

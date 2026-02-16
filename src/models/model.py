@@ -15,31 +15,24 @@ from src.models.components.redusil_adapter import ClipAdapter
 from src.utils.loss import InternalLossWeighter
 
 class PrototypeGuidedCLIP(nn.Module):
-    """
-    基于Gumbel Softmax选择机制的原型引导CLIP (最终完整版)
-    特性:
-    1. MMRL风格共享提示 (分层投影)
-    2. 动态序列替换 (Input -> Texture -> Adapter -> Global)
-    3. 知识蒸馏与Hard Negative挖掘
-    4. 连续层级注入
-    """
+    
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.num_classes = config.model.num_classes
 
-        # === [ABLATION MOD] 1. 添加消融实验开关 ===
-        # 默认全部开启 (Full Model)
-        self.use_adapter = True       # 控制 Adapter
-        self.use_shared_space = True  # 控制 Shared Prompt Network
-        self.use_hierarchical = True  # 控制 Texture/Global Pools
-        self.use_prototypes = True    # 控制 Prototype (False时使用随机Prompt)
+        
+        # (Full Model)
+        self.use_adapter = True       #  Adapter
+        self.use_shared_space = True  #  Shared Prompt Network
+        self.use_hierarchical = True  #  Texture/Global Pools
+        self.use_prototypes = True    # Prototype 
         # ==========================================
         self.prompt_length = config.model.prompt.prompt_len
         self.pool_size = config.model.prompt.prompt_pool_size
         self.top_k = config.model.prompt.top_k
         self.clip_model_name = config.model.original_clip_name
-        # === 加载 CLIP ===
+        # ===  CLIP ===
         self.original_clip, _ = clip.load(self.clip_model_name, device='cpu', jit=False)
         self.vision_layers = len(self.original_clip.visual.transformer.resblocks)
         self.text_layers = len(self.original_clip.transformer.resblocks)
@@ -47,30 +40,30 @@ class PrototypeGuidedCLIP(nn.Module):
         self.visual_width = self.original_clip.visual.conv1.out_channels
         self.text_width = self.original_clip.transformer.width 
         
-        self.original_clip.float() # 全模型转为 FP32
+        self.original_clip.float() 
 
         # =================================================================================
-        # 索引配置: 保证层级连续性
+        # 
         # =================================================================================
         
-        # 1. 视觉端
-        # Texture Start: 约第4层
+        # 
+        # Texture Start
         self.v_idx_texture = self.vision_layers//3
         if self.v_idx_texture < 0: self.v_idx_texture = 0
         
-        # Adapter Insert: 约第8层 (Texture阶段结束)
+        # Adapter Insert
         self.v_idx_adapter_insert_at = (2 * self.vision_layers) // 3 - 1
         
-        # Global Start: 紧接Adapter之后
+        # Global Start
         self.v_idx_global = self.v_idx_adapter_insert_at + 1 
 
-        # 2. 文本端
+        
         self.t_idx_p1 = self.text_layers // 3
         if self.t_idx_p1 < 0: self.t_idx_p1 = 0
         self.t_idx_adapter = (2 * self.text_layers) // 3 - 1
         self.t_idx_p2 = self.t_idx_adapter + 1
 
-        # 3. 注入层列表
+       
         self.v_layers_to_inject = [0] + \
                                 list(range(self.v_idx_texture, self.v_idx_adapter_insert_at + 1)) + \
                                 list(range(self.v_idx_global, self.vision_layers))
@@ -82,58 +75,58 @@ class PrototypeGuidedCLIP(nn.Module):
         print(f"Visual Injection Layers: {self.v_layers_to_inject}")
         print(f"Text Injection Layers: {self.t_layers_to_inject}")
 
-        # === 组件初始化 ===
+        
         self.register_buffer("prototype_centers", self._load_prototype_centers(config.model.prototype_centers_path))
         proto_dim = self.prototype_centers.shape[-1]
 
-                # 1. 视觉层映射: {层号: '组名'}
+                
         self.v_layer_mapping = {}
         
-        # Group 1: Input (第0层)
+        
         self.v_layer_mapping[0] = 'input_stage'
         
-        # Group 2: Texture (从 texture start 到 adapter insert)
+        
         for i in range(self.v_idx_texture, self.v_idx_adapter_insert_at + 1):
             self.v_layer_mapping[i] = 'texture_stage'
             
-        # Group 3: Global (从 global start 到 最后)
+        
         for i in range(self.v_idx_global, self.vision_layers):
             self.v_layer_mapping[i] = 'global_stage'
 
-        # 2. 文本层映射
+        
         self.t_layer_mapping = {}
         
-        # Group 1: Start (第0层)
+       
         self.t_layer_mapping[0] = 'start_stage'
         
-        # Group 2: P1 (前半段)
+        
         for i in range(self.t_idx_p1, self.t_idx_adapter + 1):
             self.t_layer_mapping[i] = 'p1_stage'
             
-        # Group 3: P2 (后半段)
+        
         for i in range(self.t_idx_p2, self.text_layers):
             self.t_layer_mapping[i] = 'p2_stage'
 
         print(f"Visual Sharing Groups: {self.v_layer_mapping}")
         print(f"Text Sharing Groups: {self.t_layer_mapping}")
 
-        # === 组件初始化 ===
+        
         self.register_buffer("prototype_centers", self._load_prototype_centers(config.model.prototype_centers_path))
         proto_dim = self.prototype_centers.shape[-1]
 
-        # 1. 共享提示网络 (使用 Mapping 字典初始化)
+        
         self.shared_net = SharedPromptNetwork(
             shared_dim=1024, 
             visual_dim=self.visual_width, 
             text_dim=self.text_width,                 
             prompt_len=self.prompt_length,
-            # 关键改变: 传入映射字典，而不是简单的列表
+            
             visual_layer_mapping=self.v_layer_mapping,
             text_layer_mapping=self.t_layer_mapping,
-            dropout=0.1  # 推荐加上 dropout
+            dropout=0.1  
         )
         
-        # 1. 共享提示网络
+        
         # self.shared_net = SharedPromptNetwork(
         #     shared_dim=512, 
         #     visual_dim=self.visual_width, 
@@ -143,11 +136,11 @@ class PrototypeGuidedCLIP(nn.Module):
         #     text_layers_to_inject=self.t_layers_to_inject
         # )
         
-        # 2. 文本组件
+        
         self.text_private_prompts = nn.Parameter(torch.empty(3, self.prompt_length, self.text_width))
         self.text_generator = LightweightMetaNet(input_dim=self.text_width, output_dim=self.text_width, prompt_len=self.prompt_length, hidden_dim=64)
         
-        # 3. 视觉组件
+        
         self.vision_prompt_generator_input = PCPVisualPromptGenerator(
             visual_dim=self.visual_width, proto_dim=proto_dim, prompt_len=self.prompt_length
         )
@@ -157,20 +150,20 @@ class PrototypeGuidedCLIP(nn.Module):
         self.global_prompt_pool = GumbelPromptPool(
             pool_size=self.pool_size, prompt_length=self.prompt_length, embed_dim=self.visual_width, top_k=self.top_k, embedding_key='cls'
         )
-        # === [ABLATION MOD] 备用随机 Prompt ===
-        # 当 use_prototypes=False 时，我们退化为类似 CoOp/VPT 的随机初始化参数
+        
+        
         self.random_input_prompt = nn.Parameter(torch.randn(self.prompt_length, self.visual_width))
         nn.init.normal_(self.random_input_prompt, std=0.02)
-        # ======================================
+        
 
 
-        # 4. Adapters
+        
         self.mid_adapter_vision = ClipAdapter(self.visual_width, bottleneck_dim=self.visual_width//2)
         self.final_adapter_vision = ClipAdapter(self.visual_width, bottleneck_dim=self.visual_width//2)
         self.mid_adapter_text = ClipAdapter(self.text_width, bottleneck_dim=self.text_width//2)
         self.final_adapter_text = ClipAdapter(self.text_width, bottleneck_dim=self.text_width//2)
 
-        # 5. Gates
+        
         self.gate_input = nn.Parameter(torch.ones(1) * 0.5)   
         self.gate_texture = nn.Parameter(torch.ones(1) * 0.5) 
         self.gate_global = nn.Parameter(torch.ones(1) * 0.5)  
@@ -236,7 +229,7 @@ class PrototypeGuidedCLIP(nn.Module):
         batch_size = images.shape[0]
         device = images.device
         dtype = self.original_clip.dtype
-        # 1. 蒸馏目标 (Teacher)
+        # 1.  (Teacher)
         with torch.no_grad():
             teacher_image_features = self.original_clip.encode_image(images)
             teacher_image_features = F.normalize(teacher_image_features, dim=-1).detach()
@@ -244,11 +237,11 @@ class PrototypeGuidedCLIP(nn.Module):
                 teacher_text_features = self.original_clip.encode_text(text_tokens)
                 teacher_text_features = F.normalize(teacher_text_features, dim=-1).detach()
 
-        # === [ABLATION MOD] 2. 使用开关控制 Shared Prompt ===
+        
         if self.use_shared_space:
             v_shared_prompts, t_shared_prompts = self.shared_net(batch_size)
         else:
-            # 消融掉 Shared Space，传入全零张量 (不影响加法逻辑)
+            
             v_shared_prompts = {
                 k: torch.zeros(self.prompt_length, batch_size, self.visual_width, device=device, dtype=dtype) 
                 for k in self.v_layers_to_inject
@@ -260,17 +253,17 @@ class PrototypeGuidedCLIP(nn.Module):
         # ====================================================
         # v_shared_prompts={}
         # t_shared_prompts={}
-        # 3. 视觉编码
+        
         class_ids = self.get_prototype_class_ids(images)
         image_features, texture_loss, global_loss = self.encode_image_with_hierarchical_prompts(
             images, class_ids, v_shared_prompts
         )
         
-        # 验证或仅图像模式
+        
         if text_tokens is None:
             return {'image_features': image_features, 'class_ids': class_ids}
         
-        # 4. 文本编码
+        
         text_context = self._get_text_context(text_tokens) 
         dynamic_bias = self.text_generator(text_context.float()) 
         text_features = self.encode_text_hierarchical(text_tokens, t_shared_prompts, dynamic_bias)
@@ -328,9 +321,7 @@ class PrototypeGuidedCLIP(nn.Module):
         return loss
 
     def encode_image_with_hierarchical_prompts(self, images: torch.Tensor, class_ids: torch.Tensor, v_shared_prompts):
-        """
-        视觉编码器: 连续注入版
-        """
+        
         batch_size = images.shape[0]
         vit = self.original_clip.visual
         dtype = self.original_clip.dtype
@@ -339,17 +330,16 @@ class PrototypeGuidedCLIP(nn.Module):
         # === 1. Input Stage ===
         x = vit.conv1(images.type(dtype)) 
         x = x.reshape(x.shape[0], x.shape[1], -1).permute(0, 2, 1) 
-        # === [ABLATION MOD] 3. 控制 Prototypes ===
+        #  3. Prototypes ===
 
         if self.use_prototypes:
-            # 正常逻辑：使用原型生成 Prompt
+            
             image_global_feat = x.mean(dim=1)
             selected_prototypes = self.prototype_centers[class_ids].to(dtype)
             class_prompts = self.vision_prompt_generator_input(image_global_feat, selected_prototypes)
             class_prompts = class_prompts * self.gate_input 
         else:
-            # 消融逻辑：使用随机初始化的 Prompt (类似 VPT/CoOp)
-            # 扩展到 batch_size: [len, dim] -> [1, len, dim] -> [B, len, dim]
+            
             # class_prompts = self.random_input_prompt.unsqueeze(0).repeat(batch_size, 1, 1).to(dtype)
             class_prompts = torch.zeros(batch_size, self.prompt_length, self.visual_width, device=device, dtype=dtype)
         # ========================================
@@ -363,7 +353,7 @@ class PrototypeGuidedCLIP(nn.Module):
         len_input = prompt_input.shape[0]
         
         class_token = vit.class_embedding.to(dtype) + torch.zeros(batch_size, 1, x.shape[-1], dtype=dtype, device=device)
-        # 拼接 Input Prompt: [CLS, Input, Patches]
+        #  Input Prompt: [CLS, Input, Patches]
         x = torch.cat([class_token, prompt_input.permute(1,0,2), x], dim=1) 
         
         x = x + self.pos_embed.to(dtype).to(device) 
@@ -380,15 +370,15 @@ class PrototypeGuidedCLIP(nn.Module):
         global_loss = torch.tensor(0.0, device=device, dtype=dtype)
 
         for i, block in enumerate(blocks):
-            # 获取当前层的 Shared Prompt
+           
             current_shared_p = v_shared_prompts.get(i)
             if current_shared_p is not None:
                 current_shared_p = current_shared_p.to(dtype)
 
-            # === Stage 2: Texture Prompt (4-7层连续) ===
+            
             if i == self.v_idx_texture:
-                # 首次进入纹理阶段 -> Pool Selection
-                # === [ABLATION MOD] 4. 控制 Hierarchical (Texture) ===
+                
+                
                 if self.use_hierarchical:
                     x_nld = x.permute(1, 0, 2)
                     cls_features = x_nld[:, 0, :]
@@ -397,7 +387,7 @@ class PrototypeGuidedCLIP(nn.Module):
                     texture_prompts = texture_prompts * self.gate_texture
                     # texture_loss = texture_out['orth_loss']
                 else:
-                    # 消融逻辑：不使用 Pool，直接用零张量（只靠 Shared Prompt 或 Base）
+                    
                     texture_prompts = torch.zeros(self.prompt_length, batch_size, self.visual_width, device=device, dtype=dtype)
                 # =====================================================
                 # x_nld = x.permute(1, 0, 2)
@@ -415,18 +405,18 @@ class PrototypeGuidedCLIP(nn.Module):
                         current_shared_p_expanded = current_shared_p.repeat(self.top_k, 1, 1)
                         final_texture_prompt = final_texture_prompt + current_shared_p_expanded
                     else:
-                        # 否则（消融掉 Hierarchical 或者 top_k=1），长度都是 10，直接加
+                        
                         final_texture_prompt = final_texture_prompt + current_shared_p
-                    # if self.top_k > 1 and self.use_hierarchical: # 注意：如果不开 hierarchical，dim 可能会对不上，这里简单处理
-                    #      # 这里的逻辑稍微复杂，如果关掉 hierarchical，我们假设 texture_prompts 是全0
-                    #      # 那么 final 就等于 current_shared_p
+                    # if self.top_k > 1 and self.use_hierarchical: 
+                    #      
+                    #      
                     #     pass
                     # elif self.top_k > 1: current_shared_p = current_shared_p.repeat(self.top_k, 1, 1)
                     # final_texture_prompt = final_texture_prompt + current_shared_p
                 
                 len_texture = final_texture_prompt.shape[0]
                 
-                # 替换 Input Prompt
+                
                 x = torch.cat([x[:1], final_texture_prompt, x[1+len_input:]], dim=0)
             
             elif i > self.v_idx_texture and i <= self.v_idx_adapter_insert_at:
@@ -444,8 +434,8 @@ class PrototypeGuidedCLIP(nn.Module):
             # === Stage 3: Adapter & Handover ===
             if i == self.v_idx_adapter_insert_at:
                 x = block(x)
-                """消融，去掉adapter"""
-                # === [ABLATION MOD] 5. 控制 Adapter ===
+               
+                
                 if self.use_adapter:
                     adapter_out = self.mid_adapter_vision(x)
                     x = adapter_out
@@ -453,14 +443,14 @@ class PrototypeGuidedCLIP(nn.Module):
                 # adapter_out = self.mid_adapter_vision(x)
                 # x = adapter_out
                 
-                # 移除 Texture Prompt
+                
                 x = torch.cat([x[:1], x[1+len_texture:]], dim=0)
                 continue 
 
-            # === Stage 4: Global Prompt (9-12层连续) ===
+            # === Stage 4: Global Prompt ===
             if i == self.v_idx_global:
-                # 首次进入全局阶段 -> Pool Selection
-                # === [ABLATION MOD] 6. 控制 Hierarchical (Global) ===
+               
+                
                 if self.use_hierarchical:
                     x_nld = x.permute(1, 0, 2)
                     cls_features = x_nld[:, 0, :]
@@ -495,7 +485,7 @@ class PrototypeGuidedCLIP(nn.Module):
                 
                 len_global = final_global_prompt.shape[0]
                 
-                # 插入 Global Prompt
+                #  Global Prompt
                 x = torch.cat([x[:1], final_global_prompt, x[1:]], dim=0)
             
             elif i > self.v_idx_global:
@@ -511,7 +501,7 @@ class PrototypeGuidedCLIP(nn.Module):
                 x[1 : 1 + len_global] = layer_specific_global
 
             x = block(x)
-        # === [ABLATION MOD] 7. 控制 Final Adapter ===
+        # === [ABLATION MOD] 7.  Final Adapter ===
         if self.use_adapter:
             final_adapter_out = self.final_adapter_vision(x)
             x = final_adapter_out
@@ -531,9 +521,7 @@ class PrototypeGuidedCLIP(nn.Module):
         return mask
 
     def encode_text_hierarchical(self, text, t_shared_prompts, dynamic_bias):
-        """
-        文本编码器: 连续注入版 + 修复
-        """
+        
         batch_size = text.shape[0]
         original_clip = self.original_clip
         dtype = original_clip.dtype
@@ -542,22 +530,21 @@ class PrototypeGuidedCLIP(nn.Module):
         
         x = original_clip.token_embedding(text).type(dtype)
         x = x + original_clip.positional_embedding.type(dtype)
-        # === [ABLATION MOD] Text Side: Instance-Aware Input ===
+        
         if self.use_prototypes:
-            # 【正常模式】
+            
             shared_p0 = t_shared_prompts[0].to(dtype)
             bias = dynamic_bias.permute(1, 0, 2).to(dtype)
-            # P0 = 私有参数 + 共享参数 + 动态偏置
+            
             p0 = self.text_private_prompts[0].unsqueeze(1) + shared_p0 + bias
             p0 = p0.permute(1, 0, 2) # [B, L, D]
             
         else:
-            # 【消融模式】
-            # 方案 A (推荐): 只消融动态部分 (Bias + Shared)，保留静态参数 (Private) 避免模型崩太惨
+            
+            
             # p0 = self.text_private_prompts[0].unsqueeze(0).repeat(batch_size, 1, 1).to(dtype)
             
-            # 方案 B (狠辣): 全零！连静态参数都不要了。
-            # 这意味着文本前面拼了一段空白噪音，没有任何提示作用。
+            
             p0 = torch.zeros(batch_size, self.prompt_length, self.text_width, device=device, dtype=dtype)
             # p0 = p0.permute(1, 0, 2) # [B, L, D]
         # ======================================================
@@ -607,7 +594,7 @@ class PrototypeGuidedCLIP(nn.Module):
                     x = layer(x)
                 finally:
                     layer.attn_mask = original_mask
-                # === [ABLATION MOD] 8. 控制 Text Adapter ===
+                # === [ABLATION MOD] 8.  Text Adapter ===
                 if self.use_adapter:
                     adapter_out = self.mid_adapter_text(x)
                     x = adapter_out
@@ -647,7 +634,7 @@ class PrototypeGuidedCLIP(nn.Module):
                 x = layer(x)
             finally:
                 layer.attn_mask = original_mask
-        # === [ABLATION MOD] 9. 控制 Final Text Adapter ===
+        # === [ABLATION MOD] 9.  Final Text Adapter ===
         if self.use_adapter:
             final_adapter_out = self.final_adapter_text(x)
             x = final_adapter_out
@@ -668,7 +655,7 @@ class PrototypeGuidedCLIP(nn.Module):
 
         return x
 
-    # === 外部接口 (System Validation 用) ===
+    # ===  (System Validation) ===
     def encode_text(self, text_tokens):
         batch_size = text_tokens.shape[0]
         device = text_tokens.device
@@ -692,10 +679,10 @@ class PrototypeGuidedCLIP(nn.Module):
     #     batch_size = text_tokens.shape[0]
     #     device = text_tokens.device
     #     dtype = self.original_clip.dtype
-    #     USE_SHARED_PROMPTS = True  # 如果你在做消融实验，这里必须是 False
+    #     USE_SHARED_PROMPTS = True  
         
     #     # =================================
-    #     # 2. 共享提示
+    #     
     #     # v_shared_prompts, t_shared_prompts = self.shared_net(batch_size)
         
     #     with torch.no_grad():
@@ -706,7 +693,7 @@ class PrototypeGuidedCLIP(nn.Module):
     #                 k: torch.zeros(self.prompt_length, batch_size, self.text_width, device=device, dtype=dtype) 
     #                 for k in self.t_layers_to_inject
     #             }
-    #         # 使用 no_grad 确保推理时不计算梯度
+    #         
     #         # _, t_shared_prompts = self.shared_net(batch_size)
     #         text_context = self._get_text_context(text_tokens)
     #         dynamic_bias = self.text_generator(text_context.float())
@@ -728,51 +715,37 @@ class PrototypeGuidedCLIP(nn.Module):
             features, _, _ = self.encode_image_with_hierarchical_prompts(images, class_ids, v_shared_prompts)
         return features
 # ==============================================================================
-# 添加在 src/models/newmodel.py 的最末尾
-# ==============================================================================
 
-# src/models/newmodel.py -> 替换原来的 CLIPFullFinetune 类
+# ==============================================================================
 def gather_features(features):
-    """
-    收集所有卡上的特征，并保持梯度回传。
-    输入: [B, D]
-    输出: [World_Size * B, D]
-    """
+
     if not (dist.is_available() and dist.is_initialized()):
         return features
 
-    # 使用 PyTorch 官方的 diff-able all_gather
-    # features 必须是连续的
+    
     features = features.contiguous()
     
-    # 准备容器
+    
     world_size = dist.get_world_size()
     gathered_features = [torch.zeros_like(features) for _ in range(world_size)]
     
-    # 官方 API，自带 Autograd
+    
     torch.distributed.all_gather(gathered_features, features)
     
     # 拼接
     all_features = torch.cat(gathered_features, dim=0)
     
-    # 【关键技巧】恢复梯度流
-    # torch.distributed.all_gather 在某些版本 backward 有坑
-    # 这里的 trick 是：用自己的特征替换掉 gather 结果中属于自己的那一部分
-    # 这样能保证本地梯度绝对正确流回
+    
+    
     rank = dist.get_rank()
     all_features[rank * len(features) : (rank + 1) * len(features)] = features
     
     return all_features
 
-import torch.distributed.nn # 需要这个模块
+import torch.distributed.nn 
 
 # class CLIPFullFinetune(nn.Module):
-#     """
-#     CLIP 全量微调 Baseline (严格复现 CUSA 架构与初始化)
-#     - 架构: Image -> CLIP -> LN -> Linear(Random Init) -> Output
-#     - 初始化: Random Normal (std=0.02) -> 导致初始 Zero-shot 能力丧失
-#     - 训练: 必须配合分层学习率 (Backbone: 1e-6, Head: 1e-4) 才能收敛
-#     """
+#     
 #     def __init__(self, config):
 #         super().__init__()
 #         self.config = config
@@ -780,22 +753,21 @@ import torch.distributed.nn # 需要这个模块
         
 #         print(f"🔥 [Baseline] Loading: {self.clip_model_name} (Strict CUSA Reproduction)")
         
-#         # 1. 加载模型
+#         
 #         model, _ = clip.load(self.clip_model_name, device='cpu', jit=False)
 #         if hasattr(model, 'visual'): model.visual = model.visual.float()
 #         if hasattr(model, 'transformer'): model.transformer = model.transformer.float()
 #         self.model = model.float()
 #         self.embed_dim = self.model.text_projection.shape[1]
 
-#         # 2. CUSA 投影层架构 (LayerNorm + Linear)
+#         
 #         self.ln_image = nn.LayerNorm(self.embed_dim)
 #         self.proj_image = nn.Linear(self.embed_dim, self.embed_dim)
 #         self.ln_text = nn.LayerNorm(self.embed_dim)
 #         self.proj_text = nn.Linear(self.embed_dim, self.embed_dim)
         
 #         # ======================================================
-#         # 【核心修正】恢复 CUSA 的随机初始化
-#         # 这就是 Baseline 的原始设定：破坏预训练特征，强迫模型重新适应
+#         
 #         # ======================================================
 #         print("⚠️ [Initialization] Using CUSA-style Random Normal Init (std=0.02). Expect low initial scores.")
 #         nn.init.normal_(self.proj_image.weight, std=0.02)
@@ -804,17 +776,17 @@ import torch.distributed.nn # 需要这个模块
 #         nn.init.normal_(self.proj_text.weight, std=0.02)
 #         nn.init.zeros_(self.proj_text.bias)
         
-#         # LayerNorm 初始化
+#         # LayerNorm 
 #         nn.init.ones_(self.ln_image.weight)
 #         nn.init.zeros_(self.ln_image.bias)
 #         nn.init.ones_(self.ln_text.weight)
 #         nn.init.zeros_(self.ln_text.bias)
 
 #         # 3. Logit Scale
-#         # CUSA 通常使用 CLIP 默认的 logit scale 起点
+#         
 #         self.model.logit_scale.data.fill_(np.log(1 / 0.07))
 
-#         # 4. 解冻所有参数
+#         
 #         for param in self.parameters():
 #             param.requires_grad = True
 
@@ -822,8 +794,7 @@ import torch.distributed.nn # 需要这个模块
 #         images = batch["images"]
 #         text_tokens = batch.get("text_tokens")
         
-#         # === 1. 本地特征提取 & 投影 ===
-#         # 特征会被随机初始化的 Linear 层“打乱”，这是正常的
+#         
 #         image_features = self.model.encode_image(images)
 #         image_features = self.ln_image(image_features)
 #         image_features = self.proj_image(image_features)
@@ -837,69 +808,66 @@ import torch.distributed.nn # 需要这个模块
 #         text_features = self.proj_text(text_features)
 #         text_features = F.normalize(text_features, dim=-1)
 
-#         # === 2. 内部处理 Global Gather (对 System 透明) ===
+#         
 #         logit_scale = self.model.logit_scale.exp().clamp(max=100.0)
 #         batch_size = images.shape[0]
 #         device = images.device
 
 #         if dist.is_available() and dist.is_initialized():
-#             # 使用 torch.distributed.nn.all_gather 自动处理梯度回传
-#             # 这是一个 List[Tensor]
+#             
+#             
 #             gathered_image_features = torch.distributed.nn.all_gather(image_features)
 #             gathered_text_features = torch.distributed.nn.all_gather(text_features)
             
-#             # 拼接成大矩阵 [World_Size * B, D]
+#             
 #             all_image_features = torch.cat(gathered_image_features, dim=0)
 #             all_text_features = torch.cat(gathered_text_features, dim=0)
             
-#             # 生成全局 Label
+#             
 #             rank = dist.get_rank()
 #             labels = torch.arange(batch_size, device=device) + rank * batch_size
 #         else:
-#             # 单卡模式
+#             
 #             all_image_features = image_features
 #             all_text_features = text_features
 #             labels = torch.arange(batch_size, device=device)
 
-#         # === 3. 计算 Global Loss ===
+#         # === 3.  Global Loss ===
 #         # [Batch, Global_Batch]
 #         logits_per_image = logit_scale * image_features @ all_text_features.t()
 #         logits_per_text = logit_scale * text_features @ all_image_features.t()
         
 #         loss_ce = (F.cross_entropy(logits_per_image, labels) + F.cross_entropy(logits_per_text, labels)) / 2
         
-#         # === 4. 返回 ===
+#         
 #         return {
 #             'loss': loss_ce,
 #             'aux_loss': torch.tensor(0.0, device=device),
-#             'image_features': image_features,    # System 拿去做 Validation (此时分数会很低)
+#             'image_features': image_features,    
 #             'text_features': text_features,
 #             'logits_per_image': logits_per_image 
 #         }
 
-#     # === 验证接口 ===
+#     
 #     def encode_image(self, images):
 #         with torch.no_grad():
 #             features = self.model.encode_image(images)
 #             features = self.ln_image(features)
-#             features = self.proj_image(features) # 必须包含这一层，否则验证不准确
+#             features = self.proj_image(features) 
 #             return F.normalize(features, dim=-1)
 
 #     def encode_text(self, text_tokens):
 #         with torch.no_grad():
 #             features = self.model.encode_text(text_tokens)
 #             features = self.ln_text(features)
-#             features = self.proj_text(features) # 必须包含这一层
+#             features = self.proj_text(features) 
 #             return F.normalize(features, dim=-1)
 
 
-# src/models/newmodel.py -> 替换原来的 CLIPFullFinetune 类
+
 
 class CLIPFullFinetune(nn.Module):
-    """
-    CLIP 全量微调基线模型 (CUSA 风格对齐版)
-    架构: Image -> CLIP Encoder -> LayerNorm -> Linear(FC) -> Output
-    """
+
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -907,10 +875,10 @@ class CLIPFullFinetune(nn.Module):
         
         print(f"🔥 [CUSA-Style Finetune] Loading: {self.clip_model_name}")
         
-        # 1. 加载模型
+       
         model, _ = clip.load(self.clip_model_name, device='cpu', jit=False)
         
-        # 强制转 FP32
+     
         if hasattr(model, 'visual'):
             model.visual = model.visual.float()
         if hasattr(model, 'transformer'):
@@ -919,33 +887,31 @@ class CLIPFullFinetune(nn.Module):
         
         self.embed_dim = self.model.text_projection.shape[1] # 512 for ViT-B/32
 
-        # ======================================================
-        # 【新增】完全复刻 CUSA 的投影层结构
-        # ======================================================
+   
         print("🔧 [Architecture] Adding CUSA-style Projection Layers (LN + FC)...")
         
-        # 图像端
+        
         self.ln_image = nn.LayerNorm(self.embed_dim)
         self.proj_image = nn.Linear(self.embed_dim, self.embed_dim)
         
-        # 文本端
+     
         self.ln_text = nn.LayerNorm(self.embed_dim)
         self.proj_text = nn.Linear(self.embed_dim, self.embed_dim)
         
-        # 【关键】初始化：复刻 CUSA 的 nn.init.normal_(std=0.02)
-        # 这会破坏预训练的对齐，导致初始性能大幅下降
+      
+        
         nn.init.normal_(self.proj_image.weight, std=0.02)
-        nn.init.zeros_(self.proj_image.bias) # Linear默认有bias
+        nn.init.zeros_(self.proj_image.bias) 
         
         nn.init.normal_(self.proj_text.weight, std=0.02)
         nn.init.zeros_(self.proj_text.bias)
         # ======================================================
 
-        # 2. 解冻所有参数 (包括 CLIP 和 新加的层)
+       
         for param in self.parameters():
             param.requires_grad = True
             
-        # 打印参数量 (会比原始 CLIP 多一点点，多了两个 Linear 的参数)
+        
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"🔥 Total Trainable Parameters: {trainable_params:,}")
 
@@ -953,31 +919,29 @@ class CLIPFullFinetune(nn.Module):
         images = batch["images"]
         text_tokens = batch.get("text_tokens")
         
-        # === 1. 图像编码 ===
-        # 原始 CLIP 输出
+        
         image_features = self.model.encode_image(images)
         
-        # 【新增】CUSA 风格投影: CLIP -> LN -> Linear
+        
         image_features = self.ln_image(image_features)
         image_features = self.proj_image(image_features)
         
-        # 最后归一化 (CUSA 代码里在 get_similarity 前做了归一化)
+        
         image_features = F.normalize(image_features, dim=-1)
         
         if text_tokens is None:
             return {'image_features': image_features}
             
-        # === 2. 文本编码 ===
+        
         text_features = self.model.encode_text(text_tokens)
         
-        # 【新增】CUSA 风格投影
+       
         text_features = self.ln_text(text_features)
         text_features = self.proj_text(text_features)
         
         text_features = F.normalize(text_features, dim=-1)
         
-        # === 3. 计算 Loss ===
-        # 获取 logit_scale
+        
         logit_scale = self.model.logit_scale.exp()
         
         logits_per_image = logit_scale * image_features @ text_features.t()
@@ -995,11 +959,11 @@ class CLIPFullFinetune(nn.Module):
             'logits_per_image': logits_per_image
         }
 
-    # === 验证接口 ===
+    
     def encode_image(self, images):
         with torch.no_grad():
             features = self.model.encode_image(images)
-            # 必须加上同样的投影层
+            
             features = self.ln_image(features)
             features = self.proj_image(features)
             return F.normalize(features, dim=-1)
@@ -1007,7 +971,7 @@ class CLIPFullFinetune(nn.Module):
     def encode_text(self, text_tokens):
         with torch.no_grad():
             features = self.model.encode_text(text_tokens)
-            # 必须加上同样的投影层
+            
             features = self.ln_text(features)
             features = self.proj_text(features)
             return F.normalize(features, dim=-1)

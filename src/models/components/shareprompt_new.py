@@ -1,4 +1,4 @@
-# 文件路径: src/models/components/shareprompt_new.py
+
 import torch
 import torch.nn as nn
 
@@ -11,31 +11,27 @@ class SharedPromptNetwork(nn.Module):
                  visual_layer_mapping=None, 
                  text_layer_mapping=None,
                  dropout=0.1): 
-        """
-        Layer-Aware Shared Prompting: 
-        保留跨模态共享核心(Shared Matrix)，引入层级感知(Layer Embedding)。
-        """
+
         super().__init__()
         
         self.prompt_len = prompt_len
         self.v_layers = list(visual_layer_mapping.keys()) if visual_layer_mapping else []
         self.t_layers = list(text_layer_mapping.keys()) if text_layer_mapping else []
         
-        # 找出最大的层数索引
+        
         max_v = max(self.v_layers) if self.v_layers else 0
         max_t = max(self.t_layers) if self.t_layers else 0
         max_layers = max(max_v, max_t) + 1
 
-        # === 1. 绝对的共享空间 (Space S) ===
-        # A. 共享种子 (The Brain)
+
         self.latent_tokens = nn.Parameter(torch.empty(prompt_len, shared_dim))
         nn.init.normal_(self.latent_tokens, std=0.02)
         
-        # B. 共享层级身份 (Layer Identity)
+        
         self.shared_layer_embeds = nn.Parameter(torch.empty(max_layers, shared_dim))
         nn.init.normal_(self.shared_layer_embeds, std=0.02)
 
-        # === 2. 出口 (Exit Gates) ===
+        
         self.v_global_proj = nn.Sequential(
             nn.Linear(shared_dim, visual_dim),
             # nn.Dropout(dropout)
@@ -61,13 +57,13 @@ class SharedPromptNetwork(nn.Module):
         v_prompts = {}
         t_prompts = {}
         
-        # --- 视觉端 ---
+      
         for layer_id in self.v_layers:
             identity = self.shared_layer_embeds[layer_id].reshape(1, 1, -1)
             shared_input = base_tokens + identity
             v_prompts[int(layer_id)] = self.v_global_proj(shared_input)
 
-        # --- 文本端 ---
+        
         for layer_id in self.t_layers:
             identity = self.shared_layer_embeds[layer_id].reshape(1, 1, -1)
             shared_input = base_tokens + identity

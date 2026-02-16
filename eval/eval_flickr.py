@@ -24,9 +24,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from systems.system import DistillSystem
 
 def load_flickr30k_from_json(json_file, image_root, max_images=1000):
-    """
-    从JSON文件加载Flickr30K验证集，限制最大图片数量
-    """
+
     with open(json_file, 'r') as f:
         data = json.load(f)["images"]
     
@@ -37,91 +35,89 @@ def load_flickr30k_from_json(json_file, image_root, max_images=1000):
         if count >= max_images:
             break
             
-        # 根据您提供的JSON结构
+
         filename = item.get('filename', '')
         image_path = os.path.join(image_root, filename)
         sentences = item.get('sentences', [])
         
-        # 提取所有描述的原始文本
+    
         captions = [sentence['raw'] for sentence in sentences]
         
         if os.path.exists(image_path) and len(captions) >= 5:
-            dataset.append((image_path, captions[:5]))  # 确保有5个描述
+            dataset.append((image_path, captions[:5]))  
             count += 1
-        else:
-            print(f"跳过图像 {filename}: 文件不存在或描述不足5个")
+        
     
-    print(f"从 {json_file} 加载了 {len(dataset)} 个样本 (限制: {max_images})")
+    
     return dataset
 
 def get_text_features(model, dataset, device, batch_size=64):
-    """获取文本特征 - 使用增强文本编码器"""
+    
     feature_list = []
     
-    # 收集所有文本
+    
     all_captions = []
     for img_path, captions in dataset:
-        all_captions.extend(captions[:5])  # 每个图像取5个描述
+        all_captions.extend(captions[:5])  
     
-    print(f"总文本数量: {len(all_captions)} (应该是 {len(dataset) * 5})")
     
-    # 分批处理避免OOM
+    
+    
     with torch.no_grad():
         for i in range(0, len(all_captions), batch_size):
             end_idx = min(i + batch_size, len(all_captions))
             text_batch = all_captions[i:end_idx]
             
-            # 使用CLIP的tokenizer
+            
             text_tokens = clip.tokenize(text_batch, truncate=True).to(device)
             
-            # 使用增强文本编码器
+            
             text_features = model.encode_text(text_tokens)
             
             
-            # 确保数据类型一致并移到CPU
+            
             text_features = text_features.float().cpu()
             feature_list.append(text_features)
             
-            if (i // batch_size) % 10 == 0:
-                print(f"已处理 {i}/{len(all_captions)} 个文本")
+            
     
     text_features = torch.cat(feature_list, dim=0)
     return text_features
 
 def get_image_features(model, preprocess, dataset, device, max_images=1000):
-    """获取图像特征 - 使用模型的图像编码器，限制图片数量"""
+    
     img_feature_list = []
     
-    # 确保不超过最大图片数量
+    
     dataset = dataset[:max_images]
     
     with torch.no_grad():
-        for i, (img_path, captions) in enumerate(tqdm(dataset, desc="提取图像特征")):
+        for i, (img_path, captions) in enumerate(tqdm(dataset, desc="image features")):
             try:
                 image = Image.open(img_path).convert('RGB')
                 image_input = preprocess(image).unsqueeze(0).to(device)
                 
-                # 使用模型的encode_image方法
+                
                 img_feature = model.encode_image(image_input)
                 
                 
-                # 确保数据类型一致并移到CPU
+                
                 img_feature = img_feature.float().cpu()
                 img_feature_list.append(img_feature)
                 
-                # 清理GPU内存
+                
                 if (i + 1) % 50 == 0:
                     torch.cuda.empty_cache()
                     
             except Exception as e:
-                print(f"处理图像 {img_path} 时出错: {e}")
+                print(f" {e}")
                 continue
 
     img_features = torch.cat(img_feature_list, dim=0)
     return img_features
 
 def evaluate_i2t(similarity, num_images):
-    """评估Image-to-Text检索"""
+    
     pred_true_r1 = 0
     pred_true_r5 = 0 
     pred_true_r10 = 0
@@ -164,7 +160,7 @@ def evaluate_i2t(similarity, num_images):
     return i2t_r1*100, i2t_r5*100, i2t_r10*100
 
 def evaluate_t2i(similarity, num_images):
-    """评估Text-to-Image检索"""
+    
     similarity_t2i = similarity.T
     num_texts = num_images * 5
     
@@ -174,7 +170,7 @@ def evaluate_t2i(similarity, num_images):
     
     for i in range(num_texts):
         pred = similarity_t2i[i]
-        true_index = i // 5  # 对应的图像索引
+        true_index = i // 5  
         
         # R@1
         top1_indices = pred.argsort(descending=True)[:1]
@@ -201,39 +197,37 @@ def evaluate_t2i(similarity, num_images):
     
     return t2i_r1*100, t2i_r5*100, t2i_r10*100
 def get_center_path(clip_name):
-    # 基础路径
+    
     base_dir = "/data/clc/APSE-IPIK/NEW_APSEIPIK/offline/clustering_results"
     
-    # 根据名称判断
+   
     if "ViT-B" in clip_name:
-        # L版本对应 160 类
+        
         return "/data/clc/APSE-IPIK/NEW_APSEIPIK/offline/clustering_results/cluster_centers_160.npy"
     elif "ViT-L" in clip_name:
-        # B版本对应 20 类 (假设你的B版本文件名为 cluster_centers.npy)
+        
         return "/data/clc/APSE-IPIK/NEW_APSEIPIK/offline/clustering_results/cluster_centers_vitl14_160.npy"
     else:
-        # 默认回退
+        
         return "/data/clc/APSE-IPIK/NEW_APSEIPIK/offline/clustering_results/cluster_centers_160.npy"
 OmegaConf.register_new_resolver("select_path", get_center_path)
 
 @hydra.main(config_path="../configs", config_name="eval", version_base=None)
 def evaluate_flickr30k_final(config: DictConfig):
-    """
-    使用官方分割的Flickr30K最终评估 - 限制1000张图片
-    """
-    print("=== Flickr30K 官方验证集评估 (限制1000张图片) ===")
+    
+    
     print(OmegaConf.to_yaml(config))
     
-    # 设备配置
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"使用设备: {device}")
     
-    # 最大图片数量
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    
+   
     MAX_IMAGES = 1000
     
-    # 加载权重
+    
     checkpoint_path = "/data/clc/APSE-IPIK/NEW_APSEIPIK/outputs/baseline_full_finetune_ratio0.3/flickr30k/checkpoints/best-epoch=epoch=28-rsum=val/RSUM=132.91.ckpt"
-    print(f"加载权重: {checkpoint_path}")
+    
     
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     system = DistillSystem.load_from_checkpoint(checkpoint_path, strict=False)
@@ -241,7 +235,7 @@ def evaluate_flickr30k_final(config: DictConfig):
     model.to(device)
     # model.training_stage = 2
     
-    # 处理状态字典
+    
     if 'state_dict' in checkpoint:
         state_dict = checkpoint['state_dict']
     elif 'model_state_dict' in checkpoint:
@@ -249,24 +243,24 @@ def evaluate_flickr30k_final(config: DictConfig):
     else:
         state_dict = checkpoint
     
-    # 移除可能的prefix
+   
     state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
     state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     
-    # 加载权重
+   
     model.load_state_dict(state_dict, strict=False)
    
     model.eval()
-    print("模型加载成功")
     
-    # 使用CLIP的预处理
+    
+ 
     _, preprocess = clip.load(config.model.original_clip_name, device=device)
     
-    # 加载Flickr30K数据集
+
     json_file = '/data/clc/APSE-IPIK/NEW_APSEIPIK/DATA/flickr30k/annotations/test.json'
     image_root = '/data/clc/APSE-IPIK/NEW_APSEIPIK/DATA/flickr30k/images'
     
-    # 如果路径不存在，尝试自动查找
+
     if not os.path.exists(json_file):
         possible_json_paths = [
             './data/flickr30k/val.json',
@@ -289,72 +283,60 @@ def evaluate_flickr30k_final(config: DictConfig):
                 image_root = path
                 break
     
-    print(f"JSON文件: {json_file}")
-    print(f"图像路径: {image_root}")
+
     
-    # 加载数据集 - 限制1000张图片
+
     dataset = load_flickr30k_from_json(json_file, image_root, max_images=MAX_IMAGES)
     
     if len(dataset) == 0:
-        print("错误: 没有加载到任何数据!")
+
         return
     
-    # 确保数据集不超过1000张
-    if len(dataset) > MAX_IMAGES:
-        dataset = dataset[:MAX_IMAGES]
-        print(f"警告: 数据集超过{MAX_IMAGES}张，已截断为前{MAX_IMAGES}张")
+
     
-    print(f"最终使用的图片数量: {len(dataset)}")
+
     
-    # 提取特征
-    print("开始提取文本特征...")
+
     text_features = get_text_features(model, dataset, device)
-    # text_features = get_text_features(pre_model, dataset, device)
+
     
-    print("开始提取图像特征...")
+
     image_features = get_image_features(model, preprocess, dataset, device, max_images=MAX_IMAGES)
     # image_features = get_image_features(pre_model, preprocess, dataset, device, max_images=MAX_IMAGES)
     
-    print(f"特征维度: 文本 {text_features.shape}, 图像 {image_features.shape}")
-    print(f"特征数据类型: 文本 {text_features.dtype}, 图像 {image_features.dtype}")
+
     
-    # 验证特征数量是否正确
+
     expected_text_features = len(dataset) * 5
-    if text_features.shape[0] != expected_text_features:
-        print(f"警告: 文本特征数量不匹配! 期望: {expected_text_features}, 实际: {text_features.shape[0]}")
+
     
-    if image_features.shape[0] != len(dataset):
-        print(f"警告: 图像特征数量不匹配! 期望: {len(dataset)}, 实际: {image_features.shape[0]}")
-    
-    # 确保数据类型一致
+
     image_features = image_features.float()
     text_features = text_features.float()
     
-    # 归一化
+
     image_features = F.normalize(image_features, p=2, dim=-1)
     text_features = F.normalize(text_features, p=2, dim=-1)
     
-    # 计算相似度矩阵
+
     similarity = image_features @ text_features.T
-    print(f"相似度矩阵维度: {similarity.shape}")
+
     
-    # 评估指标
-    print("\n" + "="*50)
-    print("评估结果")
-    print("="*50)
+
+
     
     num_images = len(dataset)
     
-    # Image→Text 检索
+
     i2t_r1, i2t_r5, i2t_r10 = evaluate_i2t(similarity, num_images) 
     
-    # Text→Image 检索
+
     t2i_r1, t2i_r5, t2i_r10 = evaluate_t2i(similarity, num_images)
     
-    # 计算RSUM
+
     rsum = i2t_r1 + i2t_r5 + i2t_r10 + t2i_r1 + t2i_r5 + t2i_r10
     
-    # 存储结果
+
     results = {
         'i2t_r1': float(i2t_r1),
         'i2t_r5': float(i2t_r5), 
@@ -367,16 +349,14 @@ def evaluate_flickr30k_final(config: DictConfig):
         'num_texts': num_images * 5
     }
     
-    print(f"\nRSUM: {rsum:.4f}")
-    print(f"使用的图片数量: {num_images}")
-    print(f"使用的文本数量: {num_images * 5}")
+
     
-    # 保存结果
+
     output_file = f"val_at_flickr30k_RSUM={rsum:.4f}.json"
     with open(output_file, 'w') as f:
         json.dump(results, f, indent=2)
     
-    print(f"\n结果已保存到: {output_file}")
+
     
     return results
 

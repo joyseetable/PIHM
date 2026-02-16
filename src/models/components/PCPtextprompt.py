@@ -1,4 +1,4 @@
-# 文件路径: src/models/components/LightweightMetaNet.py
+
 import torch
 import torch.nn as nn
 
@@ -20,7 +20,7 @@ class LightweightMetaNet(nn.Module):
         nn.init.kaiming_normal_(self.net[0].weight, mode='fan_out')
         nn.init.zeros_(self.net[0].bias)
         
-        # [关键] 零初始化，保证初始状态不干扰模型
+        
         nn.init.constant_(self.net[2].weight, 0)
         nn.init.constant_(self.net[2].bias, 0)
 

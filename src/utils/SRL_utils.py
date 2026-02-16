@@ -24,9 +24,7 @@ class SRLParser:
         print("✅ SRL 模型加载完成。")
 
     def parse_sentence(self, sentence: str):
-        """
-        解析单个句子，提取 实体(ARG0)、关系(V)、场景(ARG1/ARGM-LOC)。
-        """
+        
         try:
             srl_results = self.srl_pipeline(sentence)
             if not srl_results:
