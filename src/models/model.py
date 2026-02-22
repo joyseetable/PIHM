@@ -11,7 +11,7 @@ from src.models.components.Classprompt import PrototypePromptGenerator
 from src.models.components.PCPvisionprompt import PCPVisualPromptGenerator
 from src.models.components.shareprompt_new import SharedPromptNetwork
 from src.models.components.PCPtextprompt import LightweightMetaNet
-from src.models.components.redusil_adapter import ClipAdapter
+from models.components.residual_adapter import ClipAdapter
 from src.utils.loss import InternalLossWeighter
 
 class PrototypeGuidedCLIP(nn.Module):
